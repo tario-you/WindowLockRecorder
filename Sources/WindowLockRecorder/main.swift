@@ -94,11 +94,12 @@ struct RecordableWindow: Hashable {
     let appName: String
     let pid: pid_t
     let frame: CGRect
+    let layer: Int
     let window: SCWindow
 
     var displayName: String {
         let titleText = title.isEmpty ? "Untitled" : title
-        return "\(appName) - \(titleText) (\(Int(frame.width))x\(Int(frame.height)))"
+        return "\(appName) - \(titleText) (\(Int(frame.width))x\(Int(frame.height)), layer \(layer), id \(id))"
     }
 }
 
@@ -256,9 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let appPID = ProcessInfo.processInfo.processIdentifier
             windows = content.windows
                 .filter { candidate in
-                    candidate.windowLayer == 0
-                    && candidate.frame.width >= 80
-                    && candidate.frame.height >= 80
+                    candidate.frame.width >= 24
+                    && candidate.frame.height >= 24
                     && candidate.owningApplication?.processID != appPID
                     && candidate.owningApplication != nil
                 }
@@ -269,12 +269,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         appName: candidate.owningApplication?.applicationName ?? "Unknown",
                         pid: candidate.owningApplication?.processID ?? 0,
                         frame: candidate.frame,
+                        layer: candidate.windowLayer,
                         window: candidate
                     )
                 }
                 .sorted { lhs, rhs in
-                    if lhs.appName == rhs.appName {
+                    if lhs.appName == rhs.appName && lhs.layer == rhs.layer {
                         return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                    }
+                    if lhs.appName == rhs.appName {
+                        return lhs.layer < rhs.layer
                     }
                     return lhs.appName.localizedCaseInsensitiveCompare(rhs.appName) == .orderedAscending
                 }
