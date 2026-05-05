@@ -1,8 +1,10 @@
 import AppKit
 @preconcurrency import AVFoundation
 import Carbon
+import CoreGraphics
 @preconcurrency import CoreMedia
 @preconcurrency import CoreVideo
+import Foundation
 import ScreenCaptureKit
 
 private func fourCharacterCode(_ string: String) -> OSType {
@@ -111,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let durationField = NSTextField()
     private let fpsField = NSTextField()
     private let recordButton = NSButton(title: "Record", target: nil, action: nil)
+    private let permissionsButton = NSButton(title: "Request Permissions", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "Ready.")
     private var windows: [RecordableWindow] = []
     private var recorder: WindowRecorder?
@@ -118,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         buildWindow()
         installHotKey()
         Task { await refreshWindows() }
@@ -136,6 +140,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
+    }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        mainMenu.addItem(windowMenuItem)
+
+        let appMenu = NSMenu(title: "WindowLockRecorder")
+        appMenu.addItem(withTitle: "Hide WindowLockRecorder", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.items.last?.target = NSApp
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit WindowLockRecorder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.items.last?.target = NSApp
+        appMenuItem.submenu = appMenu
+
+        let windowMenu = NSMenu(title: "Window")
+        let closeItem = NSMenuItem(title: "Close Window", action: #selector(closeWindow), keyEquivalent: "w")
+        closeItem.target = self
+        windowMenu.addItem(closeItem)
+        windowMenuItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func closeWindow() {
+        NSApp.hide(nil)
+    }
+
     private func buildWindow() {
         let content = NSView()
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -151,6 +188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         recordButton.target = self
         recordButton.action = #selector(recordClicked)
         recordButton.bezelColor = .systemBlue
+        permissionsButton.target = self
+        permissionsButton.action = #selector(permissionsClicked)
 
         durationField.placeholderString = "blank = until Stop"
         fpsField.stringValue = "60"
@@ -165,7 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         form.rowSpacing = 10
         form.columnSpacing = 10
 
-        let controls = NSStackView(views: [recordButton, statusLabel])
+        let controls = NSStackView(views: [recordButton, permissionsButton, statusLabel])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 12
@@ -238,14 +277,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         toggleRecording()
     }
 
+    @objc private func permissionsClicked() {
+        requestScreenRecordingPermission()
+    }
+
     private func toggleWindowVisibility() {
         if NSApp.isHidden || !window.isVisible {
-            NSApp.unhide(nil)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            showWindow()
         } else {
             NSApp.hide(nil)
         }
+    }
+
+    private func showWindow() {
+        NSApp.unhide(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func toggleRecording() {
@@ -254,6 +301,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         Task { await startRecording() }
+    }
+
+    private func requestScreenRecordingPermission() {
+        if CGPreflightScreenCaptureAccess() {
+            statusLabel.stringValue = "Screen Recording permission already granted."
+            Task { await refreshWindows() }
+            return
+        }
+
+        armRelaunchAfterTerminationIfNeeded()
+
+        if CGRequestScreenCaptureAccess() {
+            statusLabel.stringValue = "Screen Recording permission granted. Refreshing windows..."
+            Task { await refreshWindows() }
+            return
+        }
+
+        statusLabel.stringValue = "Screen Recording permission not granted. Opened System Settings."
+        openScreenRecordingSettings()
+    }
+
+    private func openScreenRecordingSettings() {
+        armRelaunchAfterTerminationIfNeeded()
+
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func armRelaunchAfterTerminationIfNeeded() {
+        let processID = ProcessInfo.processInfo.processIdentifier
+        let bundleURL = Bundle.main.bundleURL.standardizedFileURL
+        let bundlePath = bundleURL.path.removingPercentEncoding ?? bundleURL.path
+
+        guard bundlePath.hasSuffix(".app") else {
+            return
+        }
+
+        let executablePath = Bundle.main.executableURL?.path ?? ""
+        let escapedBundlePath = shellQuoted(bundlePath)
+        let escapedExecutablePath = shellQuoted(executablePath)
+        let script = """
+        while kill -0 \(processID) 2>/dev/null; do
+          sleep 0.2
+        done
+        sleep 1
+        if ! pgrep -f \(escapedExecutablePath) >/dev/null 2>&1; then
+          /usr/bin/open \(escapedBundlePath) >/dev/null 2>&1
+        fi
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script]
+        try? process.run()
+    }
+
+    private func shellQuoted(_ string: String) -> String {
+        "'\(string.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func installHotKey() {
@@ -362,6 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func setRecordingUI(_ isRecording: Bool) {
         recordButton.title = isRecording ? "Stop" : "Record"
         refreshButton.isEnabled = !isRecording
+        permissionsButton.isEnabled = !isRecording
         windowPicker.isEnabled = !isRecording
         durationField.isEnabled = !isRecording
         fpsField.isEnabled = !isRecording
