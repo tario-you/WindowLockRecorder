@@ -108,8 +108,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private let windowPicker = NSPopUpButton()
     private let refreshButton = NSButton(title: "Refresh Windows", target: nil, action: nil)
-    private let chooseOutputButton = NSButton(title: "Choose Output...", target: nil, action: nil)
-    private let outputField = NSTextField()
     private let durationField = NSTextField()
     private let fpsField = NSTextField()
     private let recordButton = NSButton(title: "Record", target: nil, action: nil)
@@ -145,20 +143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         refreshButton.target = self
         refreshButton.action = #selector(refreshClicked)
-        chooseOutputButton.target = self
-        chooseOutputButton.action = #selector(chooseOutputClicked)
         recordButton.target = self
         recordButton.action = #selector(recordClicked)
         recordButton.bezelColor = .systemBlue
 
-        outputField.stringValue = defaultOutputPath()
-        outputField.placeholderString = "Output .mov path"
         durationField.placeholderString = "blank = until Stop"
         fpsField.stringValue = "60"
 
         let form = NSGridView(views: [
             [label("Window"), windowPicker, refreshButton],
-            [label("Output"), outputField, chooseOutputButton],
             [label("Duration"), durationField, label("seconds")],
             [label("FPS"), fpsField, label("1-120")]
         ])
@@ -205,24 +198,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return field
     }
 
-    private func defaultOutputPath() -> String {
+    private func outputURL(for selected: RecordableWindow) -> URL {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        return "\(NSHomeDirectory())/Desktop/window-lock-\(formatter.string(from: Date())).mov"
+        let app = sanitizedFilenameComponent(selected.appName)
+        let title = sanitizedFilenameComponent(selected.title.isEmpty ? "untitled" : selected.title)
+        let name = "window-lock-\(formatter.string(from: Date()))-\(app)-\(title)-\(selected.id).mov"
+        return URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Desktop")
+            .appendingPathComponent(name)
+    }
+
+    private func sanitizedFilenameComponent(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let collapsed = String(scalars)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        if collapsed.isEmpty {
+            return "window"
+        }
+        return String(collapsed.prefix(48))
     }
 
     @objc private func refreshClicked() {
         Task { await refreshWindows() }
-    }
-
-    @objc private func chooseOutputClicked() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.quickTimeMovie]
-        panel.nameFieldStringValue = URL(fileURLWithPath: outputField.stringValue).lastPathComponent
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop")
-        if panel.runModal() == .OK, let url = panel.url {
-            outputField.stringValue = url.path
-        }
     }
 
     @objc private func recordClicked() {
@@ -299,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let selected = windows[windowPicker.indexOfSelectedItem]
-        let outputURL = URL(fileURLWithPath: outputField.stringValue)
+        let outputURL = outputURL(for: selected)
         let fps = max(1, min(Int(fpsField.stringValue) ?? 60, 120))
         let duration = TimeInterval(durationField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
 
@@ -307,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let recorder = WindowRecorder()
             self.recorder = recorder
             setRecordingUI(true)
-            statusLabel.stringValue = "Recording \(selected.appName)..."
+            statusLabel.stringValue = "Recording \(selected.appName) to \(outputURL.lastPathComponent)..."
             try await recorder.start(window: selected.window, outputURL: outputURL, fps: fps)
 
             if let duration, duration > 0 {
@@ -344,8 +347,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordButton.title = isRecording ? "Stop" : "Record"
         refreshButton.isEnabled = !isRecording
         windowPicker.isEnabled = !isRecording
-        outputField.isEnabled = !isRecording
-        chooseOutputButton.isEnabled = !isRecording
         durationField.isEnabled = !isRecording
         fpsField.isEnabled = !isRecording
     }
