@@ -34,7 +34,7 @@ open /Applications/WindowLockRecorder.app
 Recordings are saved automatically to Desktop with a timestamped `.mov`
 filename based on the selected app/window.
 
-`Cmd` + `Shift` + `6` toggles the app window while the app is running.
+`Cmd` + `Shift` + `6` hides/unhides the app window while the app is running.
 
 The first run may require granting Screen Recording permission to the app in
 System Settings.

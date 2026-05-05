@@ -104,7 +104,7 @@ struct RecordableWindow: Hashable {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private let windowPicker = NSPopUpButton()
     private let refreshButton = NSButton(title: "Refresh Windows", target: nil, action: nil)
@@ -124,11 +124,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         hotKey?.invalidate()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        NSApp.hide(nil)
+        return false
     }
 
     private func buildWindow() {
@@ -186,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "WindowLockRecorder"
+        window.delegate = self
         window.contentView = content
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -233,13 +239,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func toggleWindowVisibility() {
-        if window.isVisible {
-            window.orderOut(nil)
-            return
+        if NSApp.isHidden || !window.isVisible {
+            NSApp.unhide(nil)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            NSApp.hide(nil)
         }
-
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func toggleRecording() {
