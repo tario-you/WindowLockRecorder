@@ -373,8 +373,13 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = max(Double(filter.pointPixelScale), 1.0)
-        let width = max(2, Int((window.frame.width * scale).rounded(.up)))
-        let height = max(2, Int((window.frame.height * scale).rounded(.up)))
+        let content = try? await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
+        let canvas = Self.nonScalingCanvas(for: window, scale: scale, content: content)
+        let width = canvas.width
+        let height = canvas.height
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let settings: [String: Any] = [
@@ -404,10 +409,12 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         configuration.width = width
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.scalesToFit = false
         configuration.showsCursor = true
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         configuration.queueDepth = 6
         if #available(macOS 14.0, *) {
+            configuration.preservesAspectRatio = true
             configuration.ignoreShadowsSingleWindow = true
             configuration.ignoreGlobalClipSingleWindow = true
             configuration.captureResolution = .best
@@ -425,6 +432,46 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.didAppendFrame = false
 
         try await stream.startCapture()
+    }
+
+    private static func nonScalingCanvas(
+        for window: SCWindow,
+        scale: Double,
+        content: SCShareableContent?
+    ) -> (width: Int, height: Int) {
+        let initialWidth = max(2, Int((window.frame.width * scale).rounded(.up)))
+        let initialHeight = max(2, Int((window.frame.height * scale).rounded(.up)))
+
+        guard let display = display(containing: window, in: content?.displays ?? []) else {
+            return (initialWidth, initialHeight)
+        }
+
+        let displayPixelWidth = Int(CGDisplayPixelsWide(display.displayID))
+        let displayPixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
+        let fallbackWidth = Int((display.frame.width * scale).rounded(.up))
+        let fallbackHeight = Int((display.frame.height * scale).rounded(.up))
+        let canvasWidth = max(displayPixelWidth, fallbackWidth, initialWidth, 2)
+        let canvasHeight = max(displayPixelHeight, fallbackHeight, initialHeight, 2)
+
+        return (canvasWidth, canvasHeight)
+    }
+
+    private static func display(containing window: SCWindow, in displays: [SCDisplay]) -> SCDisplay? {
+        let frame = window.frame
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        if let display = displays.first(where: { $0.frame.contains(center) }) {
+            return display
+        }
+
+        return displays.max { lhs, rhs in
+            intersectionArea(lhs.frame, frame) < intersectionArea(rhs.frame, frame)
+        }
+    }
+
+    private static func intersectionArea(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
     }
 
     func stop() async throws -> URL {
