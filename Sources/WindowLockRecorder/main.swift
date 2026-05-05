@@ -251,6 +251,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var finishContinuation: CheckedContinuation<URL, Error>?
     private var didAppendFrame = false
 
+    @MainActor
     func start(window: SCWindow, outputURL: URL, fps: Int) async throws {
         try? FileManager.default.removeItem(at: outputURL)
         try FileManager.default.createDirectory(

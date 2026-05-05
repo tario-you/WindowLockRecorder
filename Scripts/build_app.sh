@@ -46,4 +46,6 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --deep --sign - "$APP" >/dev/null
+
 echo "$APP"
