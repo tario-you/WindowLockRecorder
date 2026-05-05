@@ -1,7 +1,7 @@
 import AppKit
-import AVFoundation
-import CoreMedia
-import CoreVideo
+@preconcurrency import AVFoundation
+@preconcurrency import CoreMedia
+@preconcurrency import CoreVideo
 import ScreenCaptureKit
 
 struct RecordableWindow: Hashable {
