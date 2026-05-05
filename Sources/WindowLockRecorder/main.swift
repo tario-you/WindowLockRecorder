@@ -192,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         permissionsButton.action = #selector(permissionsClicked)
 
         durationField.placeholderString = "blank = until Stop"
-        fpsField.stringValue = "60"
+        fpsField.stringValue = "120"
 
         let form = NSGridView(views: [
             [label("Window"), windowPicker, refreshButton],
@@ -282,7 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func toggleWindowVisibility() {
-        if NSApp.isHidden || !window.isVisible {
+        if NSApp.isHidden || !window.isVisible || !NSApp.isActive {
             showWindow()
         } else {
             NSApp.hide(nil)
@@ -291,6 +291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showWindow() {
         NSApp.unhide(nil)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -426,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let selected = windows[windowPicker.indexOfSelectedItem]
         let outputURL = outputURL(for: selected)
-        let fps = max(1, min(Int(fpsField.stringValue) ?? 60, 120))
+        let fps = max(1, min(Int(fpsField.stringValue) ?? 120, 120))
         let duration = TimeInterval(durationField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
 
         do {
