@@ -31,5 +31,7 @@ open .build/WindowLockRecorder.app
 4. Optionally set a duration in seconds. Leave it blank to record until Stop.
 5. Click Record.
 
+`Cmd` + `Shift` + `6` toggles Record/Stop while the app is running.
+
 The first run may require granting Screen Recording permission to the app in
 System Settings.

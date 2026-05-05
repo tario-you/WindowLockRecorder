@@ -1,8 +1,92 @@
 import AppKit
 @preconcurrency import AVFoundation
+import Carbon
 @preconcurrency import CoreMedia
 @preconcurrency import CoreVideo
 import ScreenCaptureKit
+
+private func fourCharacterCode(_ string: String) -> OSType {
+    string.utf8.reduce(0) { ($0 << 8) + OSType($1) }
+}
+
+@MainActor
+private enum HotKeyDispatcher {
+    static var action: (@MainActor () -> Void)?
+
+    static func trigger() {
+        action?()
+    }
+}
+
+@MainActor
+final class GlobalHotKey {
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+
+    init(keyCode: UInt32, modifiers: UInt32, action: @escaping @MainActor () -> Void) throws {
+        HotKeyDispatcher.action = action
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, _, _ in
+                Task { @MainActor in
+                    HotKeyDispatcher.trigger()
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            nil,
+            &handlerRef
+        )
+        guard installStatus == noErr else {
+            throw HotKeyError.installFailed(installStatus)
+        }
+
+        let hotKeyID = EventHotKeyID(signature: fourCharacterCode("WLR6"), id: 1)
+        let registerStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        guard registerStatus == noErr else {
+            throw HotKeyError.registerFailed(registerStatus)
+        }
+    }
+
+    func invalidate() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+        if let handlerRef {
+            RemoveEventHandler(handlerRef)
+            self.handlerRef = nil
+        }
+        HotKeyDispatcher.action = nil
+    }
+}
+
+enum HotKeyError: Error, LocalizedError {
+    case installFailed(OSStatus)
+    case registerFailed(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .installFailed(let status):
+            return "Could not install hotkey handler: \(status)"
+        case .registerFailed(let status):
+            return "Could not register Cmd-Shift-6: \(status)"
+        }
+    }
+}
 
 struct RecordableWindow: Hashable {
     let id: UInt32
@@ -32,14 +116,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windows: [RecordableWindow] = []
     private var recorder: WindowRecorder?
     private var stopTask: Task<Void, Never>?
+    private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
+        installHotKey()
         Task { await refreshWindows() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        hotKey?.invalidate()
     }
 
     private func buildWindow() {
@@ -135,11 +225,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func recordClicked() {
+        toggleRecording()
+    }
+
+    private func toggleRecording() {
         if recorder != nil {
             Task { await stopRecording() }
             return
         }
         Task { await startRecording() }
+    }
+
+    private func installHotKey() {
+        do {
+            hotKey = try GlobalHotKey(
+                keyCode: UInt32(kVK_ANSI_6),
+                modifiers: UInt32(cmdKey | shiftKey)
+            ) { [weak self] in
+                self?.toggleRecording()
+            }
+        } catch {
+            statusLabel.stringValue = "Hotkey unavailable: \(error.localizedDescription)"
+        }
     }
 
     private func refreshWindows() async {
