@@ -232,6 +232,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleRecording()
     }
 
+    private func toggleWindowVisibility() {
+        if window.isVisible {
+            window.orderOut(nil)
+            return
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func toggleRecording() {
         if recorder != nil {
             Task { await stopRecording() }
@@ -246,7 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyCode: UInt32(kVK_ANSI_6),
                 modifiers: UInt32(cmdKey | shiftKey)
             ) { [weak self] in
-                self?.toggleRecording()
+                self?.toggleWindowVisibility()
             }
         } catch {
             statusLabel.stringValue = "Hotkey unavailable: \(error.localizedDescription)"
