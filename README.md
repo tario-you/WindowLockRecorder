@@ -8,19 +8,20 @@ to the selected window instead of a fixed screen rectangle.
 ## Build
 
 ```bash
-./Scripts/build_app.sh
+make package
 ```
 
 The app bundle is written to:
 
 ```text
-.build/WindowLockRecorder.app
+dist/WindowLockRecorder.app
 ```
 
-Launch it with:
+Install it like Magnify:
 
 ```bash
-open .build/WindowLockRecorder.app
+make install
+open /Applications/WindowLockRecorder.app
 ```
 
 ## Use
