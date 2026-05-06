@@ -173,6 +173,8 @@ cat > "$INFO_PLIST" <<EOF
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -246,7 +248,7 @@ if [[ "$INSTALL_APP" == "1" ]]; then
 
   if [[ "$RELAUNCH_APP" == "1" && "$was_running" == "1" ]]; then
     echo "Relaunching installed app"
-    open "$INSTALLED_APP_BUNDLE"
+    open -n "$INSTALLED_APP_BUNDLE"
   fi
 fi
 

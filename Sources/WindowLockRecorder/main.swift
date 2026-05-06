@@ -119,9 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var recorder: WindowRecorder?
     private var stopTask: Task<Void, Never>?
     private var hotKey: GlobalHotKey?
+    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        installStatusItem()
         buildWindow()
         installHotKey()
         Task { await refreshWindows() }
@@ -171,6 +173,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func closeWindow() {
         NSApp.hide(nil)
+    }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.image = menuBarIcon()
+            button.title = button.image == nil ? "WLR" : ""
+            button.toolTip = "WindowLockRecorder"
+        }
+
+        let menu = NSMenu()
+        let showItem = NSMenuItem(title: "Show Window", action: #selector(showWindowFromMenu), keyEquivalent: "")
+        showItem.target = self
+        menu.addItem(showItem)
+
+        let hideItem = NSMenuItem(title: "Hide Window", action: #selector(hideWindowFromMenu), keyEquivalent: "")
+        hideItem.target = self
+        menu.addItem(hideItem)
+
+        menu.addItem(.separator())
+
+        let permissionItem = NSMenuItem(title: "Request Permissions", action: #selector(permissionsClicked), keyEquivalent: "")
+        permissionItem.target = self
+        menu.addItem(permissionItem)
+
+        let refreshItem = NSMenuItem(title: "Refresh Windows", action: #selector(refreshClicked), keyEquivalent: "")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Quit WindowLockRecorder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+        menu.addItem(quitItem)
+
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func showWindowFromMenu() {
+        showWindow()
+    }
+
+    @objc private func hideWindowFromMenu() {
+        NSApp.hide(nil)
+    }
+
+    private func menuBarIcon() -> NSImage? {
+        guard let iconURL = Bundle.main.url(forResource: "ScreenshotMonitor", withExtension: "svg"),
+              let image = NSImage(contentsOf: iconURL) else {
+            return nil
+        }
+
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = true
+        return image
     }
 
     private func buildWindow() {
@@ -343,22 +401,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        let executablePath = Bundle.main.executableURL?.path ?? ""
         let escapedBundlePath = shellQuoted(bundlePath)
-        let escapedExecutablePath = shellQuoted(executablePath)
         let script = """
         while kill -0 \(processID) 2>/dev/null; do
           sleep 0.2
         done
         sleep 1
-        if ! pgrep -f \(escapedExecutablePath) >/dev/null 2>&1; then
-          /usr/bin/open \(escapedBundlePath) >/dev/null 2>&1
-        fi
+        /usr/bin/open \(escapedBundlePath) >/dev/null 2>&1
         """
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", script]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+        process.arguments = ["/bin/sh", "-c", script]
         try? process.run()
     }
 
@@ -696,7 +750,7 @@ struct WindowLockRecorderApp {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(.accessory)
         app.run()
     }
 }
