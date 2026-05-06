@@ -498,15 +498,17 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             withIntermediateDirectories: true
         )
 
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let scale = max(Double(filter.pointPixelScale), 1.0)
-        let content = try? await SCShareableContent.excludingDesktopWindows(
+        let content = try await SCShareableContent.excludingDesktopWindows(
             false,
             onScreenWindowsOnly: true
         )
-        let canvas = Self.nonScalingCanvas(for: window, scale: scale, content: content)
-        let width = canvas.width
-        let height = canvas.height
+        guard let display = Self.display(containing: window, in: content.displays) else {
+            throw RecorderError.displayNotFound
+        }
+
+        let filter = SCContentFilter(display: display, including: [window])
+        let width = max(2, Int(CGDisplayPixelsWide(display.displayID)))
+        let height = max(2, Int(CGDisplayPixelsHigh(display.displayID)))
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let settings: [String: Any] = [
@@ -542,8 +544,6 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         configuration.queueDepth = 6
         if #available(macOS 14.0, *) {
             configuration.preservesAspectRatio = true
-            configuration.ignoreShadowsSingleWindow = true
-            configuration.ignoreGlobalClipSingleWindow = true
             configuration.captureResolution = .best
         }
 
@@ -559,28 +559,6 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.didAppendFrame = false
 
         try await stream.startCapture()
-    }
-
-    private static func nonScalingCanvas(
-        for window: SCWindow,
-        scale: Double,
-        content: SCShareableContent?
-    ) -> (width: Int, height: Int) {
-        let initialWidth = max(2, Int((window.frame.width * scale).rounded(.up)))
-        let initialHeight = max(2, Int((window.frame.height * scale).rounded(.up)))
-
-        guard let display = display(containing: window, in: content?.displays ?? []) else {
-            return (initialWidth, initialHeight)
-        }
-
-        let displayPixelWidth = Int(CGDisplayPixelsWide(display.displayID))
-        let displayPixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
-        let fallbackWidth = Int((display.frame.width * scale).rounded(.up))
-        let fallbackHeight = Int((display.frame.height * scale).rounded(.up))
-        let canvasWidth = max(displayPixelWidth, fallbackWidth, initialWidth, 2)
-        let canvasHeight = max(displayPixelHeight, fallbackHeight, initialHeight, 2)
-
-        return (canvasWidth, canvasHeight)
     }
 
     private static func display(containing window: SCWindow, in displays: [SCDisplay]) -> SCDisplay? {
@@ -689,6 +667,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
 enum RecorderError: Error, LocalizedError {
     case writerInputRejected
+    case displayNotFound
     case notRecording
     case noFrames
     case finishFailed
@@ -697,6 +676,8 @@ enum RecorderError: Error, LocalizedError {
         switch self {
         case .writerInputRejected:
             return "AVAssetWriter rejected the video input settings."
+        case .displayNotFound:
+            return "Could not resolve the display containing the selected window."
         case .notRecording:
             return "No recording is active."
         case .noFrames:
