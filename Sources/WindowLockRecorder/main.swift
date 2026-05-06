@@ -4,6 +4,7 @@ import Carbon
 import CoreGraphics
 @preconcurrency import CoreMedia
 @preconcurrency import CoreVideo
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -101,27 +102,65 @@ struct RecordableWindow: Hashable {
 
     var displayName: String {
         let titleText = title.isEmpty ? "Untitled" : title
-        return "\(appName) - \(titleText) (\(Int(frame.width))x\(Int(frame.height)), layer \(layer), id \(id))"
+        let name = appName.isEmpty ? titleText : "\(appName) - \(titleText)"
+        if name.count <= 64 {
+            return name
+        }
+        return "\(name.prefix(30))...\(name.suffix(30))"
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class RoundedPanelView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(calibratedWhite: 0.045, alpha: 0.98).cgColor
+        layer?.cornerRadius = 18
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        layer?.borderWidth = 1
+        layer?.masksToBounds = true
+    }
+}
+
+final class FloatingOverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var window: NSWindow!
     private let windowPicker = NSPopUpButton()
-    private let refreshButton = NSButton(title: "Refresh Windows", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "", target: nil, action: nil)
     private let durationField = NSTextField()
     private let fpsField = NSTextField()
     private let recordButton = NSButton(title: "Record", target: nil, action: nil)
-    private let permissionsButton = NSButton(title: "Request Permissions", target: nil, action: nil)
+    private let permissionsButton = NSButton(title: "Permissions", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "Ready.")
+    private let windowSectionLabel = NSTextField(labelWithString: "Window: loading...")
+    private let durationSectionLabel = NSTextField(labelWithString: "Duration (sec, blank = until stop)")
+    private let fpsSectionLabel = NSTextField(labelWithString: "FPS (1-120)")
     private var windows: [RecordableWindow] = []
     private var recorder: WindowRecorder?
     private var stopTask: Task<Void, Never>?
     private var hotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
+    private var windowVisibilityItem: NSMenuItem?
+    private var singleInstanceLockFileDescriptor: Int32 = -1
+    private var didArmRelaunchAfterTermination = false
+    private var relaunchJobLabel: String?
+    private var relaunchArmDate: Date?
+    private let relaunchArmTimeoutSeconds = 120
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard acquireSingleInstanceLock() else {
+            NSApp.terminate(nil)
+            return
+        }
+
+        cleanupStaleRelaunchJobs()
         installMainMenu()
         installStatusItem()
         buildWindow()
@@ -135,6 +174,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotKey?.invalidate()
+        if singleInstanceLockFileDescriptor >= 0 {
+            flock(singleInstanceLockFileDescriptor, LOCK_UN)
+            close(singleInstanceLockFileDescriptor)
+            singleInstanceLockFileDescriptor = -1
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -145,6 +189,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showWindow()
         return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if window?.isVisible == false {
+            showWindow()
+        }
+    }
+
+    private func acquireSingleInstanceLock() -> Bool {
+        let lockURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("dev.local.WindowLockRecorder.lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            return true
+        }
+
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            singleInstanceLockFileDescriptor = descriptor
+            return true
+        }
+
+        close(descriptor)
+        NSWorkspace.shared.open(Bundle.main.bundleURL)
+        return false
     }
 
     private func installMainMenu() {
@@ -158,8 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(withTitle: "Hide WindowLockRecorder", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.items.last?.target = NSApp
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit WindowLockRecorder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenu.items.last?.target = NSApp
+        appMenu.addItem(withTitle: "Quit WindowLockRecorder", action: #selector(quitApp), keyEquivalent: "q")
+        appMenu.items.last?.target = self
         appMenuItem.submenu = appMenu
 
         let windowMenu = NSMenu(title: "Window")
@@ -175,6 +243,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.hide(nil)
     }
 
+    @objc private func quitApp() {
+        cancelRelaunchAfterTermination()
+        NSApp.terminate(nil)
+    }
+
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
@@ -184,13 +257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let menu = NSMenu()
-        let showItem = NSMenuItem(title: "Show Window", action: #selector(showWindowFromMenu), keyEquivalent: "")
-        showItem.target = self
-        menu.addItem(showItem)
+        menu.delegate = self
 
-        let hideItem = NSMenuItem(title: "Hide Window", action: #selector(hideWindowFromMenu), keyEquivalent: "")
-        hideItem.target = self
-        menu.addItem(hideItem)
+        let visibilityItem = NSMenuItem(title: "Show Window", action: #selector(toggleWindowFromMenu), keyEquivalent: "")
+        visibilityItem.target = self
+        menu.addItem(visibilityItem)
+        windowVisibilityItem = visibilityItem
 
         menu.addItem(.separator())
 
@@ -204,20 +276,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit WindowLockRecorder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        quitItem.target = NSApp
+        let quitItem = NSMenuItem(title: "Quit WindowLockRecorder", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
         menu.addItem(quitItem)
 
         item.menu = menu
         statusItem = item
+        updateStatusMenu()
     }
 
-    @objc private func showWindowFromMenu() {
-        showWindow()
+    func menuWillOpen(_ menu: NSMenu) {
+        updateStatusMenu()
     }
 
-    @objc private func hideWindowFromMenu() {
-        NSApp.hide(nil)
+    @objc private func toggleWindowFromMenu() {
+        toggleWindowVisibility()
+    }
+
+    private func updateStatusMenu() {
+        let isShown = window?.isVisible == true && !NSApp.isHidden
+        windowVisibilityItem?.title = isShown ? "Hide Window" : "Show Window"
     }
 
     private func menuBarIcon() -> NSImage? {
@@ -235,70 +313,159 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let content = NSView()
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = NSTextField(labelWithString: "Window Lock Recorder")
-        title.font = .boldSystemFont(ofSize: 20)
-
-        let subtitle = NSTextField(labelWithString: "Record a specific macOS window using ScreenCaptureKit.")
-        subtitle.textColor = .secondaryLabelColor
-
         refreshButton.target = self
         refreshButton.action = #selector(refreshClicked)
         recordButton.target = self
         recordButton.action = #selector(recordClicked)
-        recordButton.bezelColor = .systemBlue
         permissionsButton.target = self
         permissionsButton.action = #selector(permissionsClicked)
 
-        durationField.placeholderString = "blank = until Stop"
+        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh Windows")
+        refreshButton.imagePosition = .imageOnly
+        refreshButton.bezelStyle = .rounded
+        refreshButton.controlSize = .small
+        refreshButton.toolTip = "Refresh Windows"
+
+        windowPicker.addItem(withTitle: "Select a window")
+        windowPicker.font = .systemFont(ofSize: 13, weight: .regular)
+        windowPicker.controlSize = .regular
+        windowPicker.cell?.lineBreakMode = .byTruncatingMiddle
+        windowPicker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        durationField.placeholderString = "∞"
         fpsField.stringValue = "120"
+        for field in [durationField, fpsField] {
+            field.font = .systemFont(ofSize: 16, weight: .regular)
+            field.controlSize = .regular
+            field.bezelStyle = .roundedBezel
+        }
 
-        let form = NSGridView(views: [
-            [label("Window"), windowPicker, refreshButton],
-            [label("Duration"), durationField, label("seconds")],
-            [label("FPS"), fpsField, label("1-120")]
+        statusLabel.textColor = .tertiaryLabelColor
+        statusLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.maximumNumberOfLines = 2
+
+        for label in [windowSectionLabel, durationSectionLabel, fpsSectionLabel] {
+            styleSectionLabel(label)
+        }
+
+        recordButton.bezelStyle = .rounded
+        recordButton.font = .systemFont(ofSize: 13, weight: .regular)
+        recordButton.controlSize = .regular
+        permissionsButton.bezelStyle = .rounded
+        permissionsButton.font = .systemFont(ofSize: 13, weight: .regular)
+        permissionsButton.controlSize = .regular
+
+        let panel = RoundedPanelView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(panel)
+
+        let windowHeader = NSStackView(views: [windowSectionLabel, flexibleSpacer(), refreshButton])
+        windowHeader.orientation = .horizontal
+        windowHeader.alignment = .centerY
+        windowHeader.spacing = 8
+
+        let windowStack = NSStackView(views: [windowHeader, windowPicker])
+        windowStack.orientation = .vertical
+        windowStack.alignment = .leading
+        windowStack.spacing = 7
+
+        let durationStack = NSStackView(views: [
+            durationSectionLabel,
+            durationField
         ])
-        form.column(at: 0).xPlacement = .trailing
-        form.column(at: 1).width = 520
-        form.rowSpacing = 10
-        form.columnSpacing = 10
+        durationStack.orientation = .vertical
+        durationStack.alignment = .leading
+        durationStack.spacing = 7
 
-        let controls = NSStackView(views: [recordButton, permissionsButton, statusLabel])
-        controls.orientation = .horizontal
-        controls.alignment = .centerY
-        controls.spacing = 12
+        let fpsStack = NSStackView(views: [
+            fpsSectionLabel,
+            fpsField
+        ])
+        fpsStack.orientation = .vertical
+        fpsStack.alignment = .leading
+        fpsStack.spacing = 7
 
-        let stack = NSStackView(views: [title, subtitle, form, controls])
+        let fieldRow = NSStackView(views: [durationStack, fpsStack])
+        fieldRow.orientation = .horizontal
+        fieldRow.alignment = .top
+        fieldRow.distribution = .fillEqually
+        fieldRow.spacing = 16
+
+        let controlRow = NSStackView(views: [recordButton, permissionsButton])
+        controlRow.orientation = .horizontal
+        controlRow.alignment = .centerY
+        controlRow.distribution = .fillProportionally
+        controlRow.spacing = 8
+
+        let stack = NSStackView(views: [windowStack, fieldRow, controlRow, statusLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 16
+        stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
+        panel.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24)
+            panel.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            panel.topAnchor.constraint(equalTo: content.topAnchor),
+            panel.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: panel.bottomAnchor, constant: -20),
+            windowHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            windowPicker.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            fieldRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            controlRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            refreshButton.widthAnchor.constraint(equalToConstant: 40),
+            refreshButton.heightAnchor.constraint(equalToConstant: 32),
+            durationField.heightAnchor.constraint(equalToConstant: 32),
+            fpsField.heightAnchor.constraint(equalToConstant: 32),
+            durationField.widthAnchor.constraint(equalTo: durationStack.widthAnchor),
+            fpsField.widthAnchor.constraint(equalTo: fpsStack.widthAnchor),
+            recordButton.heightAnchor.constraint(equalToConstant: 34),
+            permissionsButton.heightAnchor.constraint(equalToConstant: 34),
+            permissionsButton.widthAnchor.constraint(equalToConstant: 112),
+            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 260),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        window = FloatingOverlayWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 370, height: 240),
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
         window.title = "WindowLockRecorder"
         window.delegate = self
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.contentMinSize = NSSize(width: 370, height: 240)
+        window.contentMaxSize = NSSize(width: 370, height: 240)
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
         window.contentView = content
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func label(_ text: String) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.textColor = .secondaryLabelColor
-        return field
+    private func styleSectionLabel(_ field: NSTextField) {
+        field.textColor = .tertiaryLabelColor
+        field.font = .systemFont(ofSize: 10, weight: .regular)
+    }
+
+    private func flexibleSpacer() -> NSView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return spacer
+    }
+
+    private func setStatus(_ message: String, isError: Bool = false) {
+        statusLabel.textColor = isError ? .systemRed : .tertiaryLabelColor
+        statusLabel.stringValue = message
     }
 
     private func outputURL(for selected: RecordableWindow) -> URL {
@@ -366,7 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func requestScreenRecordingPermission() {
         if CGPreflightScreenCaptureAccess() {
-            statusLabel.stringValue = "Screen Recording permission already granted."
+            setStatus("Screen Recording permission already granted.")
             Task { await refreshWindows() }
             return
         }
@@ -374,12 +541,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         armRelaunchAfterTerminationIfNeeded()
 
         if CGRequestScreenCaptureAccess() {
-            statusLabel.stringValue = "Screen Recording permission granted. Refreshing windows..."
+            setStatus("Screen Recording permission granted. Refreshing windows...")
             Task { await refreshWindows() }
             return
         }
 
-        statusLabel.stringValue = "Screen Recording permission not granted. Opened System Settings."
+        setStatus("Screen Recording permission not granted. Opened System Settings.", isError: true)
         openScreenRecordingSettings()
     }
 
@@ -393,27 +560,133 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func armRelaunchAfterTerminationIfNeeded() {
+        if didArmRelaunchAfterTermination {
+            if let relaunchArmDate,
+               Date().timeIntervalSince(relaunchArmDate) < TimeInterval(relaunchArmTimeoutSeconds) {
+                return
+            }
+            cancelRelaunchAfterTermination()
+        }
+
         let processID = ProcessInfo.processInfo.processIdentifier
         let bundleURL = Bundle.main.bundleURL.standardizedFileURL
         let bundlePath = bundleURL.path.removingPercentEncoding ?? bundleURL.path
+        let installedBundlePath = "/Applications/WindowLockRecorder.app"
+        let relaunchBundlePath = FileManager.default.fileExists(atPath: installedBundlePath)
+            ? installedBundlePath
+            : bundlePath
+        let executableName = Bundle.main.executableURL?.lastPathComponent ?? "WindowLockRecorder"
 
         guard bundlePath.hasSuffix(".app") else {
             return
         }
 
-        let escapedBundlePath = shellQuoted(bundlePath)
+        didArmRelaunchAfterTermination = true
+        relaunchArmDate = Date()
+
+        let label = "dev.local.WindowLockRecorder.relaunch.\(processID)"
+        let escapedRelaunchBundlePath = shellQuoted(relaunchBundlePath)
+        let escapedExecutableName = shellQuoted(executableName)
         let script = """
+        trap '' HUP TERM
+        log=/tmp/dev.local.WindowLockRecorder.relaunch.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') launchd armed pid \(processID) bundle \(escapedRelaunchBundlePath)" >> "$log"
+        deadline=$(( $(date +%s) + \(relaunchArmTimeoutSeconds) ))
         while kill -0 \(processID) 2>/dev/null; do
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') relaunch expired; app never quit" >> "$log"
+            exit 0
+          fi
           sleep 0.2
         done
-        sleep 1
-        /usr/bin/open \(escapedBundlePath) >/dev/null 2>&1
+        sleep 1.5
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          if /usr/bin/pgrep -x \(escapedExecutableName) >/dev/null 2>&1; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') relaunched" >> "$log"
+            exit 0
+          fi
+          echo "$(date '+%Y-%m-%d %H:%M:%S') relaunch attempt $attempt" >> "$log"
+          /usr/bin/open -n -F \(escapedRelaunchBundlePath) >> "$log" 2>&1
+          sleep 0.75
+        done
         """
 
+        if submitLaunchdRelauncher(script: script, label: label) {
+            relaunchJobLabel = label
+            return
+        }
+
+        writeRelaunchLog("launchctl submit failed; relaunch not armed")
+        didArmRelaunchAfterTermination = false
+        relaunchArmDate = nil
+    }
+
+    private func submitLaunchdRelauncher(script: String, label: String) -> Bool {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
-        process.arguments = ["/bin/sh", "-c", script]
-        try? process.run()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = [
+            "submit",
+            "-l", label,
+            "-o", "/tmp/dev.local.WindowLockRecorder.relaunch.log",
+            "-e", "/tmp/dev.local.WindowLockRecorder.relaunch.log",
+            "--",
+            "/bin/sh",
+            "-c",
+            script
+        ]
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            writeRelaunchLog("launchctl submit error: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func cancelRelaunchAfterTermination() {
+        if let relaunchJobLabel {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["remove", relaunchJobLabel]
+            if (try? process.run()) != nil {
+                process.waitUntilExit()
+            }
+            writeRelaunchLog("cancelled relaunch job \(relaunchJobLabel)")
+        }
+
+        relaunchJobLabel = nil
+        relaunchArmDate = nil
+        didArmRelaunchAfterTermination = false
+    }
+
+    private func cleanupStaleRelaunchJobs() {
+        let script = """
+        launchctl list | awk '/dev\\.local\\.WindowLockRecorder\\.(relaunch|launchctl-test)/ { print $3 }' | while read -r label; do
+          [ -n "$label" ] && launchctl remove "$label" 2>/dev/null || true
+        done
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script]
+        if (try? process.run()) != nil {
+            process.waitUntilExit()
+        }
+    }
+
+    private func writeRelaunchLog(_ message: String) {
+        let line = "\(Date()) \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/dev.local.WindowLockRecorder.relaunch.log")
+        if FileManager.default.fileExists(atPath: url.path),
+           let handle = try? FileHandle(forWritingTo: url) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
     }
 
     private func shellQuoted(_ string: String) -> String {
@@ -429,13 +702,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.toggleWindowVisibility()
             }
         } catch {
-            statusLabel.stringValue = "Hotkey unavailable: \(error.localizedDescription)"
+            setStatus("Hotkey unavailable: \(error.localizedDescription)", isError: true)
         }
     }
 
     private func refreshWindows() async {
         do {
-            statusLabel.stringValue = "Loading windows..."
+            windowSectionLabel.stringValue = "Window: loading..."
+            setStatus("Loading windows...")
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             let appPID = ProcessInfo.processInfo.processIdentifier
             windows = content.windows
@@ -467,18 +741,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
 
             windowPicker.removeAllItems()
-            for item in windows {
-                windowPicker.addItem(withTitle: item.displayName)
+            if windows.isEmpty {
+                windowPicker.addItem(withTitle: "Select a window")
+            } else {
+                for item in windows {
+                    windowPicker.addItem(withTitle: item.displayName)
+                }
             }
-            statusLabel.stringValue = windows.isEmpty ? "No recordable windows found." : "Found \(windows.count) windows."
+            if windows.isEmpty {
+                windowSectionLabel.stringValue = "Window: none found"
+                setStatus("No recordable windows found.")
+            } else {
+                windowSectionLabel.stringValue = "Window: found \(windows.count)"
+                setStatus("")
+            }
         } catch {
-            statusLabel.stringValue = "Window list failed: \(error.localizedDescription)"
+            windowPicker.removeAllItems()
+            windowPicker.addItem(withTitle: "Select a window")
+            windowSectionLabel.stringValue = "Window: permission needed"
+            setStatus(windowListErrorMessage(for: error), isError: true)
         }
+    }
+
+    private func windowListErrorMessage(for error: Error) -> String {
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("TCC") || message.localizedCaseInsensitiveContains("declined") {
+            return "Screen Recording permission is required. Click Permissions, then Refresh."
+        }
+        return "Window list failed: \(message)"
     }
 
     private func startRecording() async {
         guard windowPicker.indexOfSelectedItem >= 0, windowPicker.indexOfSelectedItem < windows.count else {
-            statusLabel.stringValue = "Pick a window first."
+            setStatus("Pick a window first.", isError: true)
             return
         }
         let selected = windows[windowPicker.indexOfSelectedItem]
@@ -490,7 +785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let recorder = WindowRecorder()
             self.recorder = recorder
             setRecordingUI(true)
-            statusLabel.stringValue = "Recording \(selected.appName) to \(outputURL.lastPathComponent)..."
+            setStatus("Recording \(selected.appName) to \(outputURL.lastPathComponent)...")
             try await recorder.start(window: selected.window, outputURL: outputURL, fps: fps)
 
             if let duration, duration > 0 {
@@ -502,7 +797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } catch {
             self.recorder = nil
             setRecordingUI(false)
-            statusLabel.stringValue = "Record failed: \(error.localizedDescription)"
+            setStatus("Record failed: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -511,15 +806,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stopTask = nil
         guard let recorder else { return }
         self.recorder = nil
-        statusLabel.stringValue = "Stopping..."
+        setStatus("Stopping...")
         do {
             let url = try await recorder.stop()
             setRecordingUI(false)
-            statusLabel.stringValue = "Saved \(url.lastPathComponent)"
+            setStatus("Saved \(url.lastPathComponent)")
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             setRecordingUI(false)
-            statusLabel.stringValue = "Stop failed: \(error.localizedDescription)"
+            setStatus("Stop failed: \(error.localizedDescription)", isError: true)
         }
     }
 
