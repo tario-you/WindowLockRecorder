@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="${APP_NAME:-WindowLockRecorder}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
+SOURCE_RESOURCES_DIR="${SOURCE_RESOURCES_DIR:-$ROOT_DIR/Resources}"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 INSTALL_APP="${INSTALL_APP:-0}"
 INSTALL_DIR="${INSTALL_DIR:-/Applications}"
@@ -138,6 +139,11 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$EXECUTABLE_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
+if [[ -d "$SOURCE_RESOURCES_DIR" ]]; then
+  echo "Copying bundle resources"
+  ditto "$SOURCE_RESOURCES_DIR" "$RESOURCES_DIR"
+fi
+
 cat > "$INFO_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -153,6 +159,8 @@ cat > "$INFO_PLIST" <<EOF
     <string>$BUNDLE_IDENTIFIER</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
     <key>CFBundlePackageType</key>
