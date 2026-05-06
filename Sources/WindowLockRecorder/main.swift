@@ -481,6 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let queue = DispatchQueue(label: "WindowLockRecorder.capture")
+    private let backgroundColor = CGColor(gray: 0.25, alpha: 1.0)
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -538,6 +539,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         configuration.width = width
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.backgroundColor = backgroundColor
         configuration.scalesToFit = false
         configuration.showsCursor = true
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
