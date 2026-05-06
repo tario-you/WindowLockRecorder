@@ -66,6 +66,12 @@ stop_running_app_if_needed() {
 
 was_running=0
 
+remove_stale_relaunch_jobs() {
+  launchctl list | awk '/dev\.local\.WindowLockRecorder\.(relaunch|launchctl-test)/ { print $3 }' | while read -r label; do
+    [[ -n "$label" ]] && launchctl remove "$label" >/dev/null 2>&1 || true
+  done
+}
+
 sign_path() {
   local target="$1"
 
@@ -226,6 +232,8 @@ if [[ "$NOTARIZE_APP" == "1" ]]; then
 fi
 
 if [[ "$INSTALL_APP" == "1" ]]; then
+  remove_stale_relaunch_jobs
+
   if stop_running_app_if_needed; then
     was_running=1
   fi
@@ -238,7 +246,9 @@ if [[ "$INSTALL_APP" == "1" ]]; then
 
   LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
   if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u -f "$APP_BUNDLE" >/dev/null 2>&1 || true
     "$LSREGISTER" -f "$INSTALLED_APP_BUNDLE" >/dev/null 2>&1 || true
+    "$LSREGISTER" -gc >/dev/null 2>&1 || true
   fi
 
   if [[ "$RESET_TCC" == "1" ]] && command -v tccutil >/dev/null 2>&1; then
@@ -248,7 +258,12 @@ if [[ "$INSTALL_APP" == "1" ]]; then
 
   if [[ "$RELAUNCH_APP" == "1" && "$was_running" == "1" ]]; then
     echo "Relaunching installed app"
-    open -n "$INSTALLED_APP_BUNDLE"
+    open "$INSTALLED_APP_BUNDLE"
+  fi
+
+  if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u -f "$APP_BUNDLE" >/dev/null 2>&1 || true
+    "$LSREGISTER" -gc >/dev/null 2>&1 || true
   fi
 fi
 
